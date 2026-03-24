@@ -137,8 +137,8 @@ class GcsTaskManager : public rpc::TaskInfoGcsServiceHandler,
   /// \param job_finish_time_ms Job finish time in ms.
   void OnJobFinished(const JobID &job_id, int64_t job_finish_time_ms);
 
-  /// Handler to be called when a worker is dead. This marks all non-terminated tasks
-  /// of the worker as failed.
+  /// Handler to be called when a worker is dead. Schedules task failure marking
+  /// after a delay to allow pending task events to arrive first.
   ///
   /// \param worker_id Worker Id
   /// \param worker_failure_data Worker failure data.
@@ -234,7 +234,12 @@ class GcsTaskManager : public rpc::TaskInfoGcsServiceHandler,
     /// failed time.
     void MarkTasksFailedOnJobEnds(const JobID &job_id, int64_t job_finish_time_ns);
 
-    /// Mark the whole tree of child tasks FAILED for each task on the dead worker.
+    /// Mark tasks FAILED when a worker dies. Behavior depends on worker and exit type:
+    /// - Normal worker, graceful exit: no-op (buffer flush handles events).
+    /// - Actor worker, graceful exit: mark root tasks only (no DFS).
+    /// - Normal worker, ungraceful exit: DFS subtree, skip actor creation tasks.
+    /// - Actor worker, ungraceful exit: mark roots + DFS subtree, skip actor creation
+    ///   tasks.
     ///
     /// \param worker_id Worker ID
     /// \param worker_failure_data Worker failure data.

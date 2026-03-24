@@ -108,39 +108,100 @@ void GcsTaskManager::GcsTaskManagerStorage::MarkChildTasksFailedOnWorkerDead(
     const WorkerID &worker_id, const rpc::WorkerTableData &worker_failure_data) {
   auto task_attempts_itr = worker_index_.find(worker_id);
   if (task_attempts_itr == worker_index_.end()) {
-    // No tasks by the worker.
+    return;
+  }
+
+  bool is_graceful =
+      worker_failure_data.exit_type() == rpc::WorkerExitType::INTENDED_USER_EXIT ||
+      worker_failure_data.exit_type() == rpc::WorkerExitType::INTENDED_SYSTEM_EXIT;
+
+  // A worker is either dedicated to running a single actor, or it runs normal tasks —
+  // never both. So the presence of an ACTOR_CREATION_TASK in worker_index_ is sufficient
+  // to identify it as an actor worker.
+  bool is_actor_worker = false;
+  for (const auto &loc : task_attempts_itr->second) {
+    const auto &events = loc->GetTaskEventsMutable();
+    if (events.has_task_info() &&
+        events.task_info().type() == rpc::TaskType::ACTOR_CREATION_TASK) {
+      is_actor_worker = true;
+      break;
+    }
+  }
+
+  // Normal worker, graceful exit — do nothing. The worker flushes its task event buffer
+  // on graceful exit, so the actual results will arrive at GCS.
+  if (!is_actor_worker && is_graceful) {
     return;
   }
 
   rpc::RayErrorInfo error_info;
-  error_info.set_error_type(rpc::ErrorType::OWNER_DIED);
   int64_t failed_ts_ns = worker_failure_data.end_time_ms() * 1000 * 1000;
 
-  // DFS over the subtree rooted at a given task, marking all descendants failed.
-  // The root task itself is skipped — its owner is responsible for marking it failed.
+  // Actor worker, graceful exit — mark only the root tasks on this worker (the
+  // ACTOR_CREATION_TASK and any running ACTOR_TASKs) as FAILED. Don't DFS into children
+  // since the graceful exit flushes the task event buffer for them.
+  // Actor workers are dedicated (one actor per worker), so if the worker dies, the actor
+  // is dead and FAILED is the correct status. IsTaskTerminated guards against overwriting
+  // tasks whose status was already reported via the buffer flush.
+  if (is_actor_worker && is_graceful) {
+    error_info.set_error_type(rpc::ErrorType::WORKER_DIED);
+    for (const auto &task_locator : task_attempts_itr->second) {
+      TaskID task_id = TaskID::FromBinary(task_locator->GetTaskEventsMutable().task_id());
+      std::stringstream error_message;
+      error_message << "Worker running the task (" << task_id.Hex()
+                    << ") died with exit_type: " << worker_failure_data.exit_type()
+                    << " with error_message: " << worker_failure_data.exit_detail();
+      error_info.set_error_message(error_message.str());
+      MarkTaskAttemptFailedIfNeeded(task_locator, failed_ts_ns, error_info);
+    }
+    return;
+  }
+
+  // Ungraceful exit — DFS the subtree, skipping actor creation tasks. Actor lifecycle is
+  // managed by GcsActorManager, and their own OnWorkerDead will handle marking them.
   std::function<void(const TaskID &)> dfs_mark_failed = [&](const TaskID &task_id) {
     auto children_itr = parent_to_child_index_.find(task_id);
     if (children_itr == parent_to_child_index_.end()) {
       return;
     }
     for (const auto &child_locator : children_itr->second) {
-      TaskID child_task_id =
-          TaskID::FromBinary(child_locator->GetTaskEventsMutable().task_id());
+      const auto &child_events = child_locator->GetTaskEventsMutable();
+      // Skip actor creation tasks — their own worker death handles their lifecycle.
+      if (child_events.has_task_info() &&
+          (child_events.task_info().type() == rpc::TaskType::ACTOR_CREATION_TASK ||
+           child_events.task_info().type() == rpc::TaskType::ACTOR_TASK)) {
+        continue;
+      }
+      TaskID child_task_id = TaskID::FromBinary(child_events.task_id());
+      error_info.set_error_type(rpc::ErrorType::OWNER_DIED);
       std::stringstream error_message;
       error_message << "Task (" << child_task_id.Hex() << ") failed because owner ("
                     << worker_id.Hex()
                     << ") died with exit_type: " << worker_failure_data.exit_type()
                     << " with error_message: " << worker_failure_data.exit_detail();
       error_info.set_error_message(error_message.str());
-      // This marking failure could be overwritten if a task event for the task comes up.
-      // But currently, final state is determined by the highest numbered state present in
-      // the state_ts map. Therefore, FAILED will persist over FINISHED.
       MarkTaskAttemptFailedIfNeeded(child_locator, failed_ts_ns, error_info);
       dfs_mark_failed(child_task_id);
     }
   };
 
   for (const auto &parent_task_locator : task_attempts_itr->second) {
+    // For actor workers with ungraceful exit, also mark the root tasks as FAILED.
+    // Unlike normal tasks where the root's owner reports its status, actor workers are
+    // dedicated — if the worker dies, the actor is dead.
+    if (is_actor_worker) {
+      TaskID task_id =
+          TaskID::FromBinary(parent_task_locator->GetTaskEventsMutable().task_id());
+      error_info.set_error_type(rpc::ErrorType::WORKER_DIED);
+      std::stringstream error_message;
+      error_message << "Task (" << task_id.Hex() << ") failed because actor worker ("
+                    << worker_id.Hex()
+                    << ") died with exit_type: " << worker_failure_data.exit_type()
+                    << " with error_message: " << worker_failure_data.exit_detail();
+      error_info.set_error_message(error_message.str());
+      MarkTaskAttemptFailedIfNeeded(parent_task_locator, failed_ts_ns, error_info);
+    }
+
     TaskID parent_task_id =
         TaskID::FromBinary(parent_task_locator->GetTaskEventsMutable().task_id());
     RAY_CHECK(!parent_task_id.IsNil());
@@ -776,20 +837,9 @@ void GcsTaskManager::SetUsageStatsClient(UsageStatsClient *usage_stats_client) {
 
 void GcsTaskManager::OnWorkerDead(
     const WorkerID &worker_id, const std::shared_ptr<rpc::WorkerTableData> &worker_data) {
-  // Only mark child tasks as failed on ungraceful death. On graceful death, the owner
-  // will flush the task buffer and the events would receive GCS eventually. If owner dies
-  // ungracefully, the events for child tasks will never reach GCS, so mark them
-  // explicitly.
-  if (worker_data->exit_type() == rpc::WorkerExitType::INTENDED_USER_EXIT ||
-      worker_data->exit_type() == rpc::WorkerExitType::INTENDED_SYSTEM_EXIT) {
-    RAY_LOG(DEBUG) << "Worker " << worker_id
-                   << " died gracefully (exit_type=" << worker_data->exit_type()
-                   << "), not marking child tasks as failed.";
-    return;
-  }
-
-  RAY_LOG(DEBUG) << "Marking all running tasks owned by the worker " << worker_id
-                 << " as failed (exit_type=" << worker_data->exit_type() << ").";
+  RAY_LOG(DEBUG) << "Worker " << worker_id
+                 << " died (exit_type=" << worker_data->exit_type()
+                 << "), scheduling task failure marking.";
 
   auto timer = std::make_shared<boost::asio::deadline_timer>(
       io_service_,
@@ -802,7 +852,6 @@ void GcsTaskManager::OnWorkerDead(
           // timer canceled or aborted.
           return;
         }
-        // Mark the entire tree of child tasks for each task on the dead worker as FAILED.
         task_event_storage_->MarkChildTasksFailedOnWorkerDead(worker_id, *worker_data);
       });
 }
