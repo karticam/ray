@@ -126,6 +126,9 @@ void LocalResourceManager::FreeTaskResourceInstances(
   }
 }
 void LocalResourceManager::MarkFootprintAsBusy(WorkFootprint item) {
+  RAY_LOG(INFO) << "[karticam] MarkFootprintAsBusy footprint="
+                << (item == WorkFootprint::NODE_WORKERS ? "NODE_WORKERS"
+                                                        : "PULLING_TASK_ARGUMENTS");
   auto prev = idle_time_states_.find(item);
   if (prev != idle_time_states_.end() && !prev->second.current.has_value() &&
       !prev->second.saved.has_value()) {
@@ -160,6 +163,9 @@ void LocalResourceManager::MaybeMarkFootprintAsBusy(WorkFootprint item) {
 }
 
 void LocalResourceManager::MarkFootprintAsIdle(WorkFootprint item) {
+  RAY_LOG(INFO) << "[karticam] MarkFootprintAsIdle footprint="
+                << (item == WorkFootprint::NODE_WORKERS ? "NODE_WORKERS"
+                                                        : "PULLING_TASK_ARGUMENTS");
   auto prev = idle_time_states_.find(item);
 
   // Already idle with no saved state to restore — do nothing.
@@ -252,6 +258,8 @@ void LocalResourceManager::SetResourceNonIdle(const scheduling::ResourceID &reso
     return;
   }
   idle_time_states_[resource_id].current = absl::nullopt;
+  RAY_LOG(INFO) << "[karticam] SetResourceNonIdle resource=" << resource_id.Binary()
+                << " -> NON-IDLE";
 }
 
 void LocalResourceManager::SetResourceIdle(const scheduling::ResourceID &resource_id) {
@@ -259,6 +267,8 @@ void LocalResourceManager::SetResourceIdle(const scheduling::ResourceID &resourc
     return;
   }
   idle_time_states_[resource_id].current = clock_.Now();
+  RAY_LOG(INFO) << "[karticam] SetResourceIdle resource=" << resource_id.Binary()
+                << " -> IDLE";
 }
 
 std::optional<absl::Time> LocalResourceManager::GetResourceIdleTime() const {
@@ -277,6 +287,35 @@ std::optional<absl::Time> LocalResourceManager::GetResourceIdleTime() const {
     all_idle_time = std::max(all_idle_time, idle_time_or_busy.value());
   }
   return all_idle_time;
+}
+
+void LocalResourceManager::DebugLogIdleStates(const std::string &context) const {
+  RAY_LOG(INFO) << "[karticam] ===== idle_time_states_ dump [" << context
+                << "] IsLocalNodeIdle=" << IsLocalNodeIdle()
+                << " IsLocalNodeDraining=" << IsLocalNodeDraining() << " =====";
+  for (const auto &iter : idle_time_states_) {
+    std::string key;
+    if (iter.first.index() == 0) {
+      switch (std::get<WorkFootprint>(iter.first)) {
+      case WorkFootprint::NODE_WORKERS:
+        key = "FOOTPRINT:NODE_WORKERS";
+        break;
+      case WorkFootprint::PULLING_TASK_ARGUMENTS:
+        key = "FOOTPRINT:PULLING_TASK_ARGUMENTS";
+        break;
+      default:
+        key = "FOOTPRINT:UNKNOWN";
+      }
+    } else {
+      key = "RESOURCE:" + std::get<ResourceID>(iter.first).Binary();
+    }
+    if (iter.second.current.has_value()) {
+      RAY_LOG(INFO) << "[karticam]   " << key << " = IDLE (since_unix_ms="
+                    << absl::ToUnixMillis(iter.second.current.value()) << ")";
+    } else {
+      RAY_LOG(INFO) << "[karticam]   " << key << " = BUSY (non-idle)";
+    }
+  }
 }
 
 bool LocalResourceManager::AllocateLocalTaskResources(
@@ -304,6 +343,8 @@ void LocalResourceManager::ReleaseWorkerResources(
   if (task_allocation == nullptr || task_allocation->IsEmpty()) {
     return;
   }
+  RAY_LOG(INFO) << "[karticam] ReleaseWorkerResources (lease released) -> freeing task "
+                   "resources; freed resources that hit available==total become IDLE";
   FreeTaskResourceInstances(task_allocation);
   OnResourceOrStateChanged();
 }
@@ -327,6 +368,9 @@ void LocalResourceManager::UpdateAvailableObjectStoreMemResource() {
   auto &total_instances = local_resources_.total.Get(ResourceID::ObjectStoreMemory());
   RAY_CHECK_EQ(total_instances.size(), 1u);
   const double used = get_used_object_store_memory_();
+  RAY_LOG(INFO) << "[karticam] UpdateAvailableObjectStoreMemResource called: "
+                   "used(GetPrimaryBytes)="
+                << used;
   const double total = total_instances[0].Double();
   auto new_available =
       std::vector<FixedPoint>{FixedPoint(total >= used ? total - used : 0.0)};
@@ -339,15 +383,21 @@ void LocalResourceManager::UpdateAvailableObjectStoreMemResource() {
     // would need to plumb the info out of the object store directly.
     if (used == 0.0) {
       // Set it to idle as of now.
-      RAY_LOG(INFO) << "Object store memory is idle.";
+      RAY_LOG(INFO) << "[karticam] ObjectStoreMemory cached idle flag -> IDLE (used=0)";
       idle_time_states_[ResourceID::ObjectStoreMemory()].current = clock_.Now();
     } else {
       // Clear the idle info since we know it's being used.
-      RAY_LOG(DEBUG) << "Object store memory is not idle.";
+      RAY_LOG(INFO) << "[karticam] ObjectStoreMemory cached idle flag -> NON-IDLE (used="
+                    << used << ")";
       idle_time_states_[ResourceID::ObjectStoreMemory()].current = absl::nullopt;
     }
 
     OnResourceOrStateChanged();
+  } else {
+    RAY_LOG(INFO)
+        << "[karticam] UpdateAvailableObjectStoreMemResource: available "
+           "unchanged -> ObjectStoreMemory cached idle flag NOT refreshed (used="
+        << used << ")";
   }
 }
 

@@ -49,6 +49,10 @@ void LocalObjectManager::PinObjectsAndWaitForFree(
       // This is the first time we're pinning this object.
       RAY_LOG(DEBUG) << "Pinning object " << object_id;
       pinned_objects_size_ += object->GetSize();
+      RAY_LOG(INFO) << "[karticam] PINNED object " << object_id
+                    << " size=" << object->GetSize()
+                    << " new_pinned_objects_size_=" << pinned_objects_size_
+                    << " (cached object-store idle flag NOT refreshed here)";
       pinned_objects_.emplace(object_id, std::move(object));
     } else {
       auto original_worker_id =

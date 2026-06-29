@@ -165,6 +165,9 @@ class LocalResourceManager : public syncer::ReporterInterface {
 
   bool IsLocalNodeIdle() const { return GetResourceIdleTime() != absl::nullopt; }
 
+  // [karticam] DEBUG: dump every idle_time_states_ entry (resource/footprint -> idle ts).
+  void DebugLogIdleStates(const std::string &context) const;
+
   /// Change the local node to the draining state.
   /// After that, no new tasks can be scheduled onto the local node.
   void SetLocalNodeDraining(const rpc::DrainRayletRequest &drain_request);

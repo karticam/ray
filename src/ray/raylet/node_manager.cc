@@ -2192,6 +2192,14 @@ void NodeManager::HandleDrainRaylet(rpc::DrainRayletRequest request,
                 << rpc::autoscaler::DrainNodeReason_Name(request.reason())
                 << ". Drain reason message: " << request.reason_message();
 
+  RAY_LOG(INFO) << "[karticam] HandleDrainRaylet: LIVE "
+                   "local_object_manager_.GetPrimaryBytes()="
+                << local_object_manager_.GetPrimaryBytes()
+                << " (if >0 but ObjectStoreMemory shows IDLE below, the cached idle "
+                   "flag is STALE and an idle drain will be wrongly accepted)";
+  cluster_resource_scheduler_.GetLocalResourceManager().DebugLogIdleStates(
+      "HandleDrainRaylet");
+
   if (cluster_resource_scheduler_.GetLocalResourceManager().IsLocalNodeDraining()) {
     reply->set_is_accepted(true);
     send_reply_callback(Status::OK(), nullptr, nullptr);

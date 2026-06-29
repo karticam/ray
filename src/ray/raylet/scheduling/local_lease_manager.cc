@@ -993,6 +993,9 @@ void LocalLeaseManager::Grant(
     const RayLease &lease,
     const std::vector<internal::ReplyCallback> &reply_callbacks) {
   const auto &lease_spec = lease.GetLeaseSpecification();
+  RAY_LOG(INFO) << "[karticam] Grant (lease GRANTED) lease_id=" << lease_spec.LeaseId()
+                << " worker=" << worker->WorkerId()
+                << " (about to mark NODE_WORKERS busy)";
 
   if (lease_spec.IsActorCreationTask()) {
     // The actor belongs to this worker now.
