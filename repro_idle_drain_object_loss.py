@@ -44,7 +44,12 @@ A/B it runs:
 ------------------------------------------------------------------------------------
 Run on a Linux devbox with Ray built from this branch:
 
-    python repro_idle_drain_object_loss.py
+    python repro_idle_drain_object_loss.py            # both (control then race)
+    python repro_idle_drain_object_loss.py control     # only the guard-works case
+    python repro_idle_drain_object_loss.py race        # only the bug case
+
+Each scenario prints its worker raylet log dir and saves that raylet's [karticam] lines
+to karticam_<scenario>_raylet.log in the current directory for separate inspection.
 
 (Uses ray.cluster_utils.Cluster to run head + worker raylets as separate processes on
 one machine; no autoscaler is involved -- the drain is issued directly via
@@ -67,6 +72,34 @@ IDLE = autoscaler_pb2.DrainNodeReason.Value("DRAIN_NODE_REASON_IDLE_TERMINATION"
 NO_DEADLINE = 2**63 - 1
 
 
+def dump_karticam_logs(worker, label: str) -> None:
+    """Print + save the worker raylet's [karticam] lines so they can be inspected even
+    after the cluster is torn down (raylet logs live under <node>/logs/raylet.{out,err})."""
+    import os
+
+    logs_dir = getattr(worker, "_logs_dir", None)
+    if not logs_dir:
+        return
+    lines = []
+    for fname in ("raylet.out", "raylet.err"):
+        path = os.path.join(logs_dir, fname)
+        if os.path.exists(path):
+            with open(path, errors="replace") as f:
+                lines += [ln.rstrip("\n") for ln in f if "[karticam]" in ln]
+    out_path = os.path.abspath(
+        f"karticam_{label.split(':')[0].strip().lower()}_raylet.log"
+    )
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(
+        f"\n[{label}] ----- worker raylet [karticam] lines "
+        f"({len(lines)} lines; saved to {out_path}) -----"
+    )
+    for ln in lines:
+        print("   " + ln)
+    print(f"[{label}] ----- end [karticam] -----\n")
+
+
 def run_scenario(sync_period_ms: int, label: str) -> str:
     print("\n" + "=" * 78)
     print(f"[{label}]  raylet_report_resources_period_milliseconds = {sync_period_ms}")
@@ -83,6 +116,7 @@ def run_scenario(sync_period_ms: int, label: str) -> str:
         _system_config={"raylet_report_resources_period_milliseconds": sync_period_ms},
     )
     ray.init(address=cluster.address)
+    worker = None
     try:
         # Worker node = the EXECUTOR; the lost object will live in its plasma.
         worker = cluster.add_node(
@@ -90,6 +124,10 @@ def run_scenario(sync_period_ms: int, label: str) -> str:
         )
         cluster.wait_for_nodes()
         worker_id = worker.node_id
+        print(
+            f"[{label}] worker raylet log dir: {worker._logs_dir}  "
+            "(grep raylet.out/.err here for [karticam])"
+        )
         gcs = GcsClient(address=ray.get_runtime_context().gcs_address)
 
         @ray.remote(num_cpus=1, max_retries=0)  # max_retries=0 => no reconstruction
@@ -152,28 +190,68 @@ def run_scenario(sync_period_ms: int, label: str) -> str:
             print("    " + str(e).strip().replace("\n", "\n    "))
             return "lost"
     finally:
+        if worker is not None:
+            dump_karticam_logs(worker, label)
         ray.shutdown()
         cluster.shutdown()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Reproduce object loss from idle-draining a node that holds a pinned, "
+            "still-referenced plasma object (max_retries=0)."
+        )
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        default="both",
+        choices=["control", "race", "both"],
+        help=(
+            "control = normal 100ms sync (guard holds, drain rejected, object safe); "
+            "race = widened 120s sync (stale flag, drain accepted, object lost); "
+            "both = run control then race (default)."
+        ),
+    )
+    args = parser.parse_args()
+
+    # (sync_period_ms, label) per scenario.
+    scenarios = {
+        "control": (100, "CONTROL: normal 100ms sync"),
+        "race": (120_000, "RACE: widened sync window (120s)"),
+    }
+    to_run = ["control", "race"] if args.mode == "both" else [args.mode]
+
     results = {}
-    # Normal sync period: the guard holds, drain is rejected, object survives.
-    results["control"] = run_scenario(100, "CONTROL: normal 100ms sync")
-    # Widened sync period: cached object-store-idle flag stays stale, idle drain is
-    # accepted while the object is pinned, and the still-referenced object is lost.
-    results["race"] = run_scenario(120_000, "RACE: widened sync window (120s)")
+    for name in to_run:
+        sync_period_ms, label = scenarios[name]
+        results[name] = run_scenario(sync_period_ms, label)
 
     print("\n" + "#" * 78)
-    print(f"# SUMMARY: control={results['control']!r}  race={results['race']!r}")
-    if results["control"] == "protected" and results["race"] == "lost":
-        print("# REPRO CONFIRMED: with a fresh object-store-idle signal the drain is")
-        print(
-            "# rejected (object safe); with a stale one it is accepted and the object"
-        )
-        print("# is lost -> ObjectReconstructionFailedError (max_retries=0).")
+    print("# SUMMARY: " + "  ".join(f"{name}={results[name]!r}" for name in to_run))
+    if args.mode == "both":
+        if results.get("control") == "protected" and results.get("race") == "lost":
+            print(
+                "# REPRO CONFIRMED: with a fresh object-store-idle signal the drain is"
+            )
+            print(
+                "# rejected (object safe); with a stale one it is accepted and the object"
+            )
+            print("# is lost -> ObjectReconstructionFailedError (max_retries=0).")
+        else:
+            print(
+                "# Repro did not produce the expected A/B; see per-scenario output above."
+            )
     else:
         print(
-            "# Repro did not produce the expected A/B; see per-scenario output above."
+            f"# Ran '{args.mode}' only. Inspect karticam_{args.mode}_raylet.log "
+            "(saved in CWD) for the [karticam] lines."
         )
     print("#" * 78)
+
+
+if __name__ == "__main__":
+    main()

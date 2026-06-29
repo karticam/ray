@@ -2210,6 +2210,10 @@ void NodeManager::HandleDrainRaylet(rpc::DrainRayletRequest request,
       rpc::autoscaler::DrainNodeReason::DRAIN_NODE_REASON_IDLE_TERMINATION) {
     const bool is_idle =
         cluster_resource_scheduler_.GetLocalResourceManager().IsLocalNodeIdle();
+    RAY_LOG(INFO)
+        << "[karticam] HandleDrainRaylet DECISION reason=IDLE_TERMINATION is_idle="
+        << is_idle << " -> "
+        << (is_idle ? "ACCEPT (node will drain)" : "REJECT (no longer idle)");
     if (is_idle) {
       cluster_resource_scheduler_.GetLocalResourceManager().SetLocalNodeDraining(request);
       reply->set_is_accepted(true);
