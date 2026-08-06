@@ -634,6 +634,12 @@ RAY_CONFIG(bool, enable_ray_event, true)
 
 RAY_CONFIG(uint64_t, ray_event_recorder_max_queued_events, 10000)
 
+/// Max number of task events RayTaskEventRecorder sends to the event aggregator in a
+/// single export, and the max number of dropped task attempts reported alongside them.
+/// This caps both the message size and the per-export work. Setting the value to 0 sends
+/// everything currently buffered.
+RAY_CONFIG(uint64_t, ray_event_recorder_send_batch_size, 50 * 1000)
+
 /// Comma separated list of components we enable grpc metrics collection for.
 /// Only effective if `enable_metrics_collection` is also true. Will have some performance
 /// degredations.

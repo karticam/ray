@@ -275,14 +275,14 @@ TEST_F(RayTaskEventRecorderTest, TestAllOrNoneSkipsBufferedEventForDroppedAttemp
   EXPECT_EQ(dropped[0].task_id(), Tid("task1"));
 }
 
-// (claude) An export sends at most task_events_send_batch_size events; what does not fit
-// stays buffered for the next export instead of being dropped.
+// (claude) An export sends at most ray_event_recorder_send_batch_size events; what does
+// not fit stays buffered for the next export instead of being dropped.
 TEST_F(RayTaskEventRecorderTest, TestExportSendsAtMostOneBatch) {
   RayConfig::instance().initialize(
       R"({"enable_ray_event": true,
           "enable_ray_task_event_recorder": true,
           "ray_events_report_interval_ms": 1,
-          "task_events_send_batch_size": 2})");
+          "ray_event_recorder_send_batch_size": 2})");
   recorder_->StartExportingEvents();
 
   AddOne(StatusEvent("task1", 0));
