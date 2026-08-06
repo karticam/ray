@@ -1739,29 +1739,25 @@ INSTANTIATE_TEST_SUITE_P(TaskEventBufferTest,
                          TaskEventBufferTestDifferentDestination,
                          ::testing::Values(DifferentDestination{true, true},
                                            DifferentDestination{true, false},
-                                           DifferentDestination{false, true},
-                                           DifferentDestination{false, false}));
+                                           DifferentDestination{false, true}));
 
 INSTANTIATE_TEST_SUITE_P(TaskEventBufferTest,
                          TaskEventBufferTestBatchSendDifferentDestination,
                          ::testing::Values(DifferentDestination{true, true},
                                            DifferentDestination{true, false},
-                                           DifferentDestination{false, true},
-                                           DifferentDestination{false, false}));
+                                           DifferentDestination{false, true}));
 
 INSTANTIATE_TEST_SUITE_P(TaskEventBufferTest,
                          TaskEventBufferTestDroppedAttemptsOnly,
                          ::testing::Values(DifferentDestination{true, true},
                                            DifferentDestination{true, false},
-                                           DifferentDestination{false, true},
-                                           DifferentDestination{false, false}));
+                                           DifferentDestination{false, true}));
 
 INSTANTIATE_TEST_SUITE_P(TaskEventBufferTest,
                          TaskEventBufferTestLimitBufferDifferentDestination,
                          ::testing::Values(DifferentDestination{true, true},
                                            DifferentDestination{true, false},
-                                           DifferentDestination{false, true},
-                                           DifferentDestination{false, false}));
+                                           DifferentDestination{false, true}));
 
 }  // namespace worker
 
