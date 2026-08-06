@@ -15,6 +15,7 @@
 #include "ray/observability/ray_task_event_recorder.h"
 
 #include <algorithm>
+#include <limits>
 #include <list>
 #include <memory>
 #include <string>
@@ -157,17 +158,19 @@ void RayTaskEventRecorder::AddProfileEvent(std::unique_ptr<RayEventInterface> ev
 void RayTaskEventRecorder::TakeEventsToSend(
     std::list<std::unique_ptr<RayEventInterface>> *events,
     absl::flat_hash_set<TaskAttemptId> *dropped_to_send) {
-  const int64_t max_dropped_task_attempts =
-      RayConfig::instance().task_events_dropped_task_attempt_batch_size();
-  while ((max_dropped_task_attempts < 0 ||
-          dropped_to_send->size() < static_cast<size_t>(max_dropped_task_attempts)) &&
+  const size_t configured_batch_size =
+      RayConfig::instance().ray_event_recorder_send_batch_size();
+  const size_t batch_size = configured_batch_size == 0
+                                ? std::numeric_limits<size_t>::max()
+                                : configured_batch_size;
+
+  while (dropped_to_send->size() < batch_size &&
          !dropped_task_attempts_unreported_.empty()) {
     auto itr = dropped_task_attempts_unreported_.begin();
     dropped_to_send->insert(*itr);
     dropped_task_attempts_unreported_.erase(itr);
   }
 
-  const size_t batch_size = RayConfig::instance().task_events_send_batch_size();
   size_t num_skipped = 0;
 
   size_t num_status_events_to_take = std::min(batch_size, status_events_.size());
